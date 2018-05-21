@@ -26,11 +26,15 @@
 #include <WifiCreds.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include "message_data.h"
 #define ONE_WIRE_BUS D3
 #define MQTT_PORT 1883
 uint8_t MAC_array[6];
 char MAC_char[18];
 #define READ_TEMP_INTERVAL 1000
+#define MAX_AWAKE_MS 10 * 1500 // 15,000ms 15s
+#define TEMP_MESSAGE_INTERVAL_MS 10 * 1000 // 10,000ms 10s
+#define TEMP_READ_INTERVAL_MS 2000 // 2s
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
 
@@ -39,17 +43,20 @@ DallasTemperature sensors(&oneWire);
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-long lastMsg = 0;
-unsigned long lastRead = 0;
-float temp   = 0.0;
+unsigned long lastTempMessageSentAt = 0;
+unsigned long lastTempReadAt = 0;
+bool result;
+
 char msg[50];
 char currentHostname[14];
 
 
-void getTemp(){
+float getTemp(){
+  float temp;
   sensors.requestTemperatures();
   temp = sensors.getTempFByIndex(0);
   serialLogTemp(temp);
+  return temp;
   // Current Temp: -196.60ºF
   // Current Temp: 185.00ºF
 }
@@ -135,7 +142,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, "TEMP_REQ") == 0){
     if ((char)payload[0] == '1') {
       Serial.println("Temperature update requested!");
-      sendTempUpdate();
+      float temp = getTemp();
+      sendTempUpdate(temp);
     }
   }
 }
@@ -162,37 +170,85 @@ void reconnect() {
     }
   }
 }
-void sendTempUpdate(){
-  getTemp();
-  char tempChar[7];
+bool sendTempUpdate(float temp){
+  char temperature[7];
   // Convert float to char array
   // dtostrf(FLOAT,WIDTH,PRECSISION,BUFFER);
-  dtostrf(temp,4,2,tempChar);
-  // Format msg
-  // TODO: move msg to a local variable? Unneeded outside of this scope.
-  sprintf(msg, "%s,%s", currentHostname, tempChar);
+  dtostrf(temp,4,2,temperature);
+  sprintf(msg, "%s,%s", currentHostname, temperature);
 
   Serial.print("Publish message: ");
   Serial.println(msg);
-  client.publish("outTopic", msg);
+
+  bool result = client.publish("outTopic", msg);
+  return result;
+}
+
+bool invalidTempReading(float temp){
+  bool result = (temp < -20.0 || temp > 120.0 || temp == 0.000 );
+  return result;
+}
+
+bool sendMessage(char* topic, char* message){
+  reconnect();
+  client.loop();
+
+  bool result = client.publish(topic, message);
+  Serial.print("result: ");
+  Serial.println(result);
+  client.loop();
+  return result;
+}
+
+bool sendMessage_v2(MessageData data)
+{
+  char message[48];
+  sprintf(message, "HOSTNAME:%s,TEMP:%s,BATTERY:%s", data.hostname, data.temperature, data.battery);
+  bool result = sendMessage("data", message);
+  return result;
 }
 
 
-void loop() {
+void loop(){
   ArduinoOTA.handle();
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
 
-  while(temp == -196.00 || temp == 185.00 || temp == 0.0 ){
-    getTemp();
+  float temp = 0.000;
+  // float batt = 0.000;
+
+  while(invalidTempReading(temp) && millis() > (lastTempReadAt + TEMP_READ_INTERVAL_MS) ){
+    // read the temperature from the sensor constantly
+    // if there isnt a good reading
+    temp = getTemp();
+    Serial.print("Temp: ");
+    Serial.println(temp);
+    lastTempReadAt = millis();
+    // batt = fuelGauge.stateOfCharge();
+    // Serial.print("Batt: ");
+    // Serial.println(batt);
   }
+  // if we haven't sent a successful update
+  // if it's time to send an update and we've got a valid temperature
+  // send the update
+  if(!result) {
+    if(millis() > (lastTempMessageSentAt + TEMP_MESSAGE_INTERVAL_MS) && !invalidTempReading(temp) ){
 
+      // char battery[4];
 
-  long now = millis();
-  if (now - lastMsg > SEND_TEMP_INTERVAL) {
-    lastMsg = now;
-    sendTempUpdate();
+      // dtostrf(batt,4,2,battery);
+      MessageData data;
+      data.hostname = currentHostname;
+      dtostrf(temp,4,2,data.temperature);
+      sendMessage_v2(data);
+      result = sendTempUpdate(temp);
+      // continue with v1
+      if(result){
+        lastTempMessageSentAt = millis();
+      }
+      delay(1500);
+    }
   }
 }
