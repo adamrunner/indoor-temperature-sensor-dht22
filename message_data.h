@@ -1,8 +1,8 @@
 struct message_data
 {
    char* hostname;
-   char temperature[4];
-   char battery[4];
+   char temperature[8];
+   char battery[8];
    // char humidity[4];
 };
 

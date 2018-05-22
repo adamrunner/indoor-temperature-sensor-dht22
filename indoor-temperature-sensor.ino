@@ -33,7 +33,7 @@ uint8_t MAC_array[6];
 char MAC_char[18];
 #define READ_TEMP_INTERVAL 1000
 #define MAX_AWAKE_MS 10 * 1500 // 15,000ms 15s
-#define TEMP_MESSAGE_INTERVAL_MS 10 * 1000 // 10,000ms 10s
+#define TEMP_MESSAGE_INTERVAL_MS 300000 // 300,000ms 300s 5m
 #define TEMP_READ_INTERVAL_MS 2000 // 2s
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
@@ -42,11 +42,11 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 WiFiClient espClient;
 PubSubClient client(espClient);
-
 unsigned long lastTempMessageSentAt = 0;
-unsigned long lastTempReadAt = 0;
-bool result;
+unsigned long lastTempReadAt        = 0;
 
+bool result;
+bool firstBoot;
 char msg[50];
 char currentHostname[14];
 
@@ -55,19 +55,11 @@ float getTemp(){
   float temp;
   sensors.requestTemperatures();
   temp = sensors.getTempFByIndex(0);
-  serialLogTemp(temp);
   return temp;
-  // Current Temp: -196.60ºF
-  // Current Temp: 185.00ºF
-}
-
-void serialLogTemp(int temperature){
-  Serial.print("Current Temp: ");
-  Serial.print(temperature);
-  Serial.println("ºF");
 }
 
 void setup() {
+  firstBoot = true;
   Serial.begin(115200);
   setup_wifi();
   client.setServer(TEMP_SERVER, MQTT_PORT);
@@ -157,10 +149,8 @@ void reconnect() {
     if (client.connect(currentHostname)) {
       Serial.println("connected");
       // ... and resubscribe
+      client.subscribe("SET_INTERVAL");
       client.subscribe("TEMP_REQ");
-      client.subscribe("LED");
-      client.subscribe("PSU");
-      client.subscribe("PUMP");
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -193,6 +183,11 @@ bool sendMessage(char* topic, char* message){
   reconnect();
   client.loop();
 
+  Serial.println("sending");
+  Serial.print("Topic: ");
+  Serial.print(topic);
+  Serial.println("Messge: ");
+  Serial.println(message);
   bool result = client.publish(topic, message);
   Serial.print("result: ");
   Serial.println(result);
@@ -208,8 +203,23 @@ bool sendMessage_v2(MessageData data)
   return result;
 }
 
+bool sendUpdate(MessageData data, float temp, float batt)
+{
+  bool result;
+  dtostrf(batt,4,2,data.battery);
+  dtostrf(temp,4,2,data.temperature);
+  sendMessage_v2(data);
+  result = sendTempUpdate(temp);
+  // continue with v1
+  if(result){
+    lastTempMessageSentAt = millis();
+  }
+  delay(1500);
+  return result;
+}
 
 void loop(){
+  result = false;
   ArduinoOTA.handle();
   if (!client.connected()) {
     reconnect();
@@ -217,7 +227,9 @@ void loop(){
   client.loop();
 
   float temp = 0.000;
-  // float batt = 0.000;
+  float batt = 0.000;
+  MessageData data;
+  data.hostname = currentHostname;
 
   while(invalidTempReading(temp) && millis() > (lastTempReadAt + TEMP_READ_INTERVAL_MS) ){
     // read the temperature from the sensor constantly
@@ -227,28 +239,13 @@ void loop(){
     Serial.println(temp);
     lastTempReadAt = millis();
     // batt = fuelGauge.stateOfCharge();
-    // Serial.print("Batt: ");
-    // Serial.println(batt);
+    Serial.print("Batt: ");
+    Serial.println(batt);
   }
-  // if we haven't sent a successful update
   // if it's time to send an update and we've got a valid temperature
   // send the update
-  if(!result) {
-    if(millis() > (lastTempMessageSentAt + TEMP_MESSAGE_INTERVAL_MS) && !invalidTempReading(temp) ){
-
-      // char battery[4];
-
-      // dtostrf(batt,4,2,battery);
-      MessageData data;
-      data.hostname = currentHostname;
-      dtostrf(temp,4,2,data.temperature);
-      sendMessage_v2(data);
-      result = sendTempUpdate(temp);
-      // continue with v1
-      if(result){
-        lastTempMessageSentAt = millis();
-      }
-      delay(1500);
-    }
+  if(firstBoot || millis() > (lastTempMessageSentAt + TEMP_MESSAGE_INTERVAL_MS) && !invalidTempReading(temp) ){
+    result = sendUpdate(data, temp, batt);
+    firstBoot = false;
   }
 }
