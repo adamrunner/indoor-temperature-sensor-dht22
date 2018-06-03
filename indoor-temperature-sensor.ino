@@ -198,7 +198,7 @@ bool sendMessage(char* topic, char* message){
 bool sendMessage_v2(MessageData data)
 {
   char message[48];
-  sprintf(message, "HOSTNAME:%s,TEMP:%s,BATTERY:%s", data.hostname, data.temperature, data.battery);
+  sprintf(message, "HOSTNAME:%s,TEMP:%s", data.hostname, data.temperature);
   bool result = sendMessage("data", message);
   return result;
 }
