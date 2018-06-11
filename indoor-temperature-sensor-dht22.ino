@@ -24,22 +24,21 @@
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
 #include <WifiCreds.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
+#include "DHT.h"
+#define DHTPIN 0
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
 #include "message_data.h"
-#define ONE_WIRE_BUS D3
+
 #define MQTT_PORT 1883
 uint8_t MAC_array[6];
 char MAC_char[18];
 #define READ_TEMP_INTERVAL 1000
 #define MAX_AWAKE_MS 10 * 1500 // 15,000ms 15s
 #define TEMP_MESSAGE_INTERVAL_MS 300000 // 300,000ms 300s 5m
-#define TEMP_READ_INTERVAL_MS 2000 // 2s
-// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
-OneWire oneWire(ONE_WIRE_BUS);
+#define TEMP_READ_INTERVAL_MS 5000 // 5s
 
-// Pass our oneWire reference to Dallas Temperature.
-DallasTemperature sensors(&oneWire);
 WiFiClient espClient;
 PubSubClient client(espClient);
 unsigned long lastTempMessageSentAt = 0;
@@ -53,10 +52,10 @@ char currentHostname[14];
 
 float getTemp(){
   float temp;
-  sensors.requestTemperatures();
-  temp = sensors.getTempFByIndex(0);
+  temp = dht.readTemperature(true);
   return temp;
 }
+
 
 void setup() {
   firstBoot = true;
@@ -133,9 +132,30 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(topic, "TEMP_REQ") == 0){
     if ((char)payload[0] == '1') {
-      Serial.println("Temperature update requested!");
-      float temp = getTemp();
-      sendTempUpdate(temp);
+      float temp    = 0.000;
+      float humid   = 0.000;
+      float heatIdx = 0.000;
+      MessageData data;
+      data.hostname = currentHostname;
+
+      while(invalidTempReading(temp) && millis() > (lastTempReadAt + TEMP_READ_INTERVAL_MS) ){
+        // read the temperature from the sensor constantly
+        // if there isnt a good reading
+        temp    = dht.readTemperature(true);
+        humid   = dht.readHumidity();
+        heatIdx = dht.computeHeatIndex(temp, humid, true);
+        lastTempReadAt = millis();
+        Serial.println("### In Callback ###");
+        Serial.print("Temp: ");
+        Serial.println(temp);
+        Serial.print("Humidity: ");
+        Serial.println(humid);
+        Serial.print("Heat Index: ");
+        Serial.println(heatIdx);
+
+      }
+
+      sendUpdate(data, temp, humid, heatIdx);
     }
   }
 }
@@ -162,20 +182,18 @@ void reconnect() {
 }
 bool sendTempUpdate(float temp){
   char temperature[7];
-  // Convert float to char array
-  // dtostrf(FLOAT,WIDTH,PRECSISION,BUFFER);
   dtostrf(temp,4,2,temperature);
   sprintf(msg, "%s,%s", currentHostname, temperature);
 
-  Serial.print("Publish message: ");
-  Serial.println(msg);
-
-  bool result = client.publish("outTopic", msg);
+  bool result = sendMessage("outTopic", msg);
   return result;
 }
 
 bool invalidTempReading(float temp){
-  bool result = (temp < -20.0 || temp > 120.0 || temp == 0.000 );
+  if(isnan(temp)){
+    return true;
+  }
+  bool result = (temp < -50.0 || temp > 120.0);
   return result;
 }
 
@@ -183,13 +201,13 @@ bool sendMessage(char* topic, char* message){
   reconnect();
   client.loop();
 
-  Serial.println("sending");
+  Serial.println("Sending..");
   Serial.print("Topic: ");
-  Serial.print(topic);
-  Serial.println("Messge: ");
+  Serial.println(topic);
+  Serial.print("Message: ");
   Serial.println(message);
   bool result = client.publish(topic, message);
-  Serial.print("result: ");
+  Serial.print("Result: ");
   Serial.println(result);
   client.loop();
   return result;
@@ -197,24 +215,27 @@ bool sendMessage(char* topic, char* message){
 
 bool sendMessage_v2(MessageData data)
 {
-  char message[48];
-  sprintf(message, "HOSTNAME:%s,TEMP:%s", data.hostname, data.temperature);
+  char message[72];
+  sprintf(message, "HOSTNAME:%s,TEMP:%s,HUMIDITY:%s,HEAT_INDEX:%s", data.hostname, data.temperature, data.humidity, data.heatIndex);
   bool result = sendMessage("data", message);
   return result;
 }
 
-bool sendUpdate(MessageData data, float temp, float batt)
+bool sendUpdate(MessageData data, float temp, float humidity, float heatIndex)
 {
   bool result;
-  dtostrf(batt,4,2,data.battery);
+  dtostrf(heatIndex,4,2,data.heatIndex);
+  dtostrf(humidity,4,2,data.humidity);
   dtostrf(temp,4,2,data.temperature);
   sendMessage_v2(data);
   result = sendTempUpdate(temp);
   // continue with v1
-  if(result){
-    lastTempMessageSentAt = millis();
-  }
   delay(1500);
+  return result;
+}
+
+bool timeToSendUpdate(){
+  bool result = millis() > (lastTempMessageSentAt + TEMP_MESSAGE_INTERVAL_MS);
   return result;
 }
 
@@ -225,27 +246,39 @@ void loop(){
     reconnect();
   }
   client.loop();
-
-  float temp = 0.000;
-  float batt = 0.000;
+  float temp    = 255.0000;
+  float humid   = 255.0000;
+  float heatIdx = 255.0000;
   MessageData data;
   data.hostname = currentHostname;
 
   while(invalidTempReading(temp) && millis() > (lastTempReadAt + TEMP_READ_INTERVAL_MS) ){
     // read the temperature from the sensor constantly
     // if there isnt a good reading
-    temp = getTemp();
-    Serial.print("Temp: ");
-    Serial.println(temp);
-    lastTempReadAt = millis();
-    // batt = fuelGauge.stateOfCharge();
-    Serial.print("Batt: ");
-    Serial.println(batt);
+    temp    = dht.readTemperature(true);
+    humid   = dht.readHumidity();
+    heatIdx = dht.computeHeatIndex(temp, humid, true);
+
+    if (isnan(humid) || isnan(temp) || isnan(heatIdx)) {
+      Serial.println("Failed to read from DHT sensor!");
+      delay(10000);
+    }else{
+      lastTempReadAt = millis();
+      Serial.print("Temp: ");
+      Serial.println(temp);
+      Serial.print("Humidity: ");
+      Serial.println(humid);
+      Serial.print("Heat Index: ");
+      Serial.println(heatIdx);
+    }
   }
   // if it's time to send an update and we've got a valid temperature
   // send the update
-  if(firstBoot || millis() > (lastTempMessageSentAt + TEMP_MESSAGE_INTERVAL_MS) && !invalidTempReading(temp) ){
-    result = sendUpdate(data, temp, batt);
+  if((firstBoot || timeToSendUpdate()) && !invalidTempReading(temp) ){
+    result    = sendUpdate(data, temp, humid, heatIdx);
     firstBoot = false;
+  }
+  if(result){
+    lastTempMessageSentAt = millis();
   }
 }
