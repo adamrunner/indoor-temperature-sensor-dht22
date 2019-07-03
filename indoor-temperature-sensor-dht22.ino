@@ -1,7 +1,7 @@
 /*
   MQTT Temperature Client
   Hardware Setup:
-  DS18B20 Connected on Pin 2 / D4
+  DHT22 Connected on Pin 0 / D3
 
   OTA Uploads - default port of 8266
   TEMP_SERVER - server IP
@@ -34,7 +34,6 @@ DHT dht(DHTPIN, DHTTYPE);
 #define MQTT_PORT 1883
 uint8_t MAC_array[6];
 char MAC_char[18];
-#define READ_TEMP_INTERVAL 1000
 #define MAX_AWAKE_MS 10 * 1500 // 15,000ms 15s
 #define TEMP_MESSAGE_INTERVAL_MS 300000 // 300,000ms 300s 5m
 #define TEMP_READ_INTERVAL_MS 5000 // 5s
